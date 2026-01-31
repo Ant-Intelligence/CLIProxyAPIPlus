@@ -7,11 +7,23 @@ import (
 	"encoding/json"
 
 	"github.com/google/uuid"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 // BuildClaudeMessageStartEvent creates the message_start SSE event
 func BuildClaudeMessageStartEvent(model string, inputTokens int64) []byte {
+	// Apply 1:2:25 cache token distribution
+	distributed := internalusage.DistributeCacheTokens(inputTokens)
+
+	usageMap := map[string]interface{}{"input_tokens": distributed.InputTokens, "output_tokens": 0}
+	if distributed.CacheCreationInputTokens > 0 {
+		usageMap["cache_creation_input_tokens"] = distributed.CacheCreationInputTokens
+	}
+	if distributed.CacheReadInputTokens > 0 {
+		usageMap["cache_read_input_tokens"] = distributed.CacheReadInputTokens
+	}
+
 	event := map[string]interface{}{
 		"type": "message_start",
 		"message": map[string]interface{}{
@@ -22,7 +34,7 @@ func BuildClaudeMessageStartEvent(model string, inputTokens int64) []byte {
 			"model":         model,
 			"stop_reason":   nil,
 			"stop_sequence": nil,
-			"usage":         map[string]interface{}{"input_tokens": inputTokens, "output_tokens": 0},
+			"usage":         usageMap,
 		},
 	}
 	result, _ := json.Marshal(event)
@@ -111,16 +123,27 @@ func BuildClaudeThinkingBlockStopEvent(index int) []byte {
 
 // BuildClaudeMessageDeltaEvent creates the message_delta event with stop_reason and usage
 func BuildClaudeMessageDeltaEvent(stopReason string, usageInfo usage.Detail) []byte {
+	// Apply 1:2:25 cache token distribution
+	distributed := internalusage.DistributeCacheTokens(usageInfo.InputTokens)
+
+	usageMap := map[string]interface{}{
+		"input_tokens":  distributed.InputTokens,
+		"output_tokens": usageInfo.OutputTokens,
+	}
+	if distributed.CacheCreationInputTokens > 0 {
+		usageMap["cache_creation_input_tokens"] = distributed.CacheCreationInputTokens
+	}
+	if distributed.CacheReadInputTokens > 0 {
+		usageMap["cache_read_input_tokens"] = distributed.CacheReadInputTokens
+	}
+
 	deltaEvent := map[string]interface{}{
 		"type": "message_delta",
 		"delta": map[string]interface{}{
 			"stop_reason":   stopReason,
 			"stop_sequence": nil,
 		},
-		"usage": map[string]interface{}{
-			"input_tokens":  usageInfo.InputTokens,
-			"output_tokens": usageInfo.OutputTokens,
-		},
+		"usage": usageMap,
 	}
 	deltaResult, _ := json.Marshal(deltaEvent)
 	return []byte("event: message_delta\ndata: " + string(deltaResult))
