@@ -106,8 +106,11 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 			messageStartTemplate, _ = sjson.Set(messageStartTemplate, "message.usage.output_tokens", candidatesTokenCount.Int())
 		}
 
-		// Override default values with actual response metadata if available from the Gemini CLI response
-		if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
+		// Override default model with client's requested model name, falling back to upstream model version
+		requestedModel := gjson.GetBytes(originalRequestRawJSON, "model").String()
+		if requestedModel != "" {
+			messageStartTemplate, _ = sjson.Set(messageStartTemplate, "message.model", requestedModel)
+		} else if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
 			messageStartTemplate, _ = sjson.Set(messageStartTemplate, "message.model", modelVersionResult.String())
 		}
 		if responseIDResult := gjson.GetBytes(rawJSON, "response.responseId"); responseIDResult.Exists() {
@@ -392,7 +395,12 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 
 	responseJSON := `{"id":"","type":"message","role":"assistant","model":"","content":null,"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
 	responseJSON, _ = sjson.Set(responseJSON, "id", root.Get("response.responseId").String())
-	responseJSON, _ = sjson.Set(responseJSON, "model", root.Get("response.modelVersion").String())
+	responseModel := root.Get("response.modelVersion").String()
+	requestedModel := gjson.GetBytes(originalRequestRawJSON, "model").String()
+	if requestedModel != "" {
+		responseModel = requestedModel
+	}
+	responseJSON, _ = sjson.Set(responseJSON, "model", responseModel)
 
 	// Apply 1:2:25 cache token distribution
 	totalInputTokens := promptTokens + cachedTokens

@@ -93,6 +93,14 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 		}
 	}
 
+	// Pre-populate Model from client request so streaming chunks use the requested model name
+	p := (*param).(*ConvertOpenAIResponseToAnthropicParams)
+	if p.Model == "" {
+		if requestedModel := gjson.GetBytes(originalRequestRawJSON, "model").String(); requestedModel != "" {
+			p.Model = requestedModel
+		}
+	}
+
 	if !bytes.HasPrefix(rawJSON, dataTag) {
 		return []string{}
 	}
@@ -106,7 +114,12 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 
 	streamResult := gjson.GetBytes(originalRequestRawJSON, "stream")
 	if !streamResult.Exists() || (streamResult.Exists() && streamResult.Type == gjson.False) {
-		return convertOpenAINonStreamingToAnthropic(rawJSON)
+		results := convertOpenAINonStreamingToAnthropic(rawJSON)
+		requestedModel := gjson.GetBytes(originalRequestRawJSON, "model").String()
+		if requestedModel != "" && len(results) > 0 {
+			results[0], _ = sjson.Set(results[0], "model", requestedModel)
+		}
+		return results
 	} else {
 		return convertOpenAIStreamingChunkToAnthropic(rawJSON, (*param).(*ConvertOpenAIResponseToAnthropicParams))
 	}
@@ -548,13 +561,17 @@ func stopTextContentBlock(param *ConvertOpenAIResponseToAnthropicParams, results
 // Returns:
 //   - string: An Anthropic-compatible JSON response.
 func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
-	_ = originalRequestRawJSON
 	_ = requestRawJSON
 
 	root := gjson.ParseBytes(rawJSON)
 	out := `{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
 	out, _ = sjson.Set(out, "id", root.Get("id").String())
-	out, _ = sjson.Set(out, "model", root.Get("model").String())
+	requestedModel := gjson.GetBytes(originalRequestRawJSON, "model").String()
+	if requestedModel != "" {
+		out, _ = sjson.Set(out, "model", requestedModel)
+	} else {
+		out, _ = sjson.Set(out, "model", root.Get("model").String())
+	}
 
 	hasToolCall := false
 	stopReasonSet := false
