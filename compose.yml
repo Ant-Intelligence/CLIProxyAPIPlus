@@ -1,0 +1,77 @@
+# Docker Compose configuration with PostgreSQL token store
+# This setup is suitable for multi-instance deployments with shared authentication
+
+services:
+  # PostgreSQL database for centralized token and config storage
+  postgres:
+    # Default: postgres:18-alpine (latest stable, Nov 2025)
+    # Alternatives: postgres:17-alpine (mature), postgres:16-alpine (LTS until 2028)
+    image: postgres:${POSTGRES_VERSION:-18-alpine}
+    container_name: cliproxy-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cliproxy}
+      POSTGRES_USER: ${POSTGRES_USER:-cliproxy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_secure_password}
+      # Performance tuning for small to medium deployments
+      POSTGRES_SHARED_BUFFERS: ${POSTGRES_SHARED_BUFFERS:-256MB}
+      POSTGRES_MAX_CONNECTIONS: ${POSTGRES_MAX_CONNECTIONS:-100}
+    ports:
+      # Only expose if you need external access (not recommended for production)
+      - "5432:5432"
+    volumes:
+      - ./postgresql:/var/lib/postgresql/18/docker
+      # Optional: custom PostgreSQL config
+      # - ./postgres.conf:/etc/postgresql/postgresql.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cliproxy} -d ${POSTGRES_DB:-cliproxy}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Primary CLIProxyAPI instance
+  cli-proxy-api:
+    image: heishui/cli-proxy-api-plus:latest
+    pull_policy: always
+    container_name: cli-proxy-api
+    environment:
+      # Cloud deployment mode (optional)
+      DEPLOY: ${DEPLOY:-}
+      MANAGEMENT_PASSWORD: ${MANAGEMENT_PASSWORD}
+
+      # PostgreSQL Token Store configuration
+      PGSTORE_DSN: postgresql://${POSTGRES_USER:-cliproxy}:${POSTGRES_PASSWORD:-changeme_secure_password}@postgres:5432/${POSTGRES_DB:-cliproxy}?sslmode=disable
+      PGSTORE_SCHEMA: ${PGSTORE_SCHEMA:-cliproxy}
+      PGSTORE_LOCAL_PATH: /var/lib/cliproxy/pgstore
+
+      # Optional: Proxy configuration
+      # proxy-url: ${PROXY_URL:-}
+    ports:
+      - "${CLI_PROXY_PORT_1:-8317}:8317"
+      - "${CLI_PROXY_OAUTH_PORT_1:-8885}:8085"
+      - "1455:1455"
+      - "54545:54545"
+      - "51121:51121"
+      - "11451:11451"
+    volumes:
+      # Config file (optional, can use PostgreSQL-stored config)
+      - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
+      # Local cache directory for PostgreSQL store
+      - cli_proxy_cache:/var/lib/cliproxy/pgstore
+      # Logs
+      - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    # Healthcheck disabled - requires curl which is not available in alpine image
+    # healthcheck:
+    #   test: ["CMD-SHELL", "curl -f -H 'Authorization: Bearer AiCode_202668' http://localhost:8317/v1/models || exit 1"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 40s
+
+volumes:
+  cli_proxy_cache:
+    driver: local
