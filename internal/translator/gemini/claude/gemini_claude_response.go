@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -256,8 +257,19 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				}
 
 				thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
+
+				// Apply 1:2:25 cache token distribution
+				promptTokenCount := usageResult.Get("promptTokenCount").Int()
+				distributed := internalusage.DistributeCacheTokens(promptTokenCount)
+
+				template, _ = sjson.Set(template, "usage.input_tokens", distributed.InputTokens)
 				template, _ = sjson.Set(template, "usage.output_tokens", candidatesTokenCountResult.Int()+thoughtsTokenCount)
-				template, _ = sjson.Set(template, "usage.input_tokens", usageResult.Get("promptTokenCount").Int())
+				if distributed.CacheCreationInputTokens > 0 {
+					template, _ = sjson.Set(template, "usage.cache_creation_input_tokens", distributed.CacheCreationInputTokens)
+				}
+				if distributed.CacheReadInputTokens > 0 {
+					template, _ = sjson.Set(template, "usage.cache_read_input_tokens", distributed.CacheReadInputTokens)
+				}
 
 				output = output + template + "\n\n\n"
 			}
@@ -289,8 +301,18 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 	inputTokens := root.Get("usageMetadata.promptTokenCount").Int()
 	outputTokens := root.Get("usageMetadata.candidatesTokenCount").Int() + root.Get("usageMetadata.thoughtsTokenCount").Int()
-	out, _ = sjson.Set(out, "usage.input_tokens", inputTokens)
+
+	// Apply 1:2:25 cache token distribution
+	distributed := internalusage.DistributeCacheTokens(inputTokens)
+
+	out, _ = sjson.Set(out, "usage.input_tokens", distributed.InputTokens)
 	out, _ = sjson.Set(out, "usage.output_tokens", outputTokens)
+	if distributed.CacheCreationInputTokens > 0 {
+		out, _ = sjson.Set(out, "usage.cache_creation_input_tokens", distributed.CacheCreationInputTokens)
+	}
+	if distributed.CacheReadInputTokens > 0 {
+		out, _ = sjson.Set(out, "usage.cache_read_input_tokens", distributed.CacheReadInputTokens)
+	}
 
 	parts := root.Get("candidates.0.content.parts")
 	textBuilder := strings.Builder{}

@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
-	log "github.com/sirupsen/logrus"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -330,14 +330,17 @@ func appendFinalEvents(params *Params, output *string, force bool) {
 
 	*output = *output + "event: message_delta\n"
 	*output = *output + "data: "
-	delta := fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":"%s","stop_sequence":null},"usage":{"input_tokens":%d,"output_tokens":%d}}`, stopReason, params.PromptTokenCount, usageOutputTokens)
-	// Add cache_read_input_tokens if cached tokens are present (indicates prompt caching is working)
-	if params.CachedTokenCount > 0 {
-		var err error
-		delta, err = sjson.Set(delta, "usage.cache_read_input_tokens", params.CachedTokenCount)
-		if err != nil {
-			log.Warnf("antigravity claude response: failed to set cache_read_input_tokens: %v", err)
-		}
+
+	// Apply 1:2:25 cache token distribution
+	totalInputTokens := params.PromptTokenCount + params.CachedTokenCount
+	distributed := internalusage.DistributeCacheTokens(totalInputTokens)
+
+	delta := fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":"%s","stop_sequence":null},"usage":{"input_tokens":%d,"output_tokens":%d}}`, stopReason, distributed.InputTokens, usageOutputTokens)
+	if distributed.CacheCreationInputTokens > 0 {
+		delta, _ = sjson.Set(delta, "usage.cache_creation_input_tokens", distributed.CacheCreationInputTokens)
+	}
+	if distributed.CacheReadInputTokens > 0 {
+		delta, _ = sjson.Set(delta, "usage.cache_read_input_tokens", distributed.CacheReadInputTokens)
 	}
 	*output = *output + delta + "\n\n\n"
 
@@ -390,15 +393,18 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 	responseJSON := `{"id":"","type":"message","role":"assistant","model":"","content":null,"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
 	responseJSON, _ = sjson.Set(responseJSON, "id", root.Get("response.responseId").String())
 	responseJSON, _ = sjson.Set(responseJSON, "model", root.Get("response.modelVersion").String())
-	responseJSON, _ = sjson.Set(responseJSON, "usage.input_tokens", promptTokens)
+
+	// Apply 1:2:25 cache token distribution
+	totalInputTokens := promptTokens + cachedTokens
+	distributed := internalusage.DistributeCacheTokens(totalInputTokens)
+
+	responseJSON, _ = sjson.Set(responseJSON, "usage.input_tokens", distributed.InputTokens)
 	responseJSON, _ = sjson.Set(responseJSON, "usage.output_tokens", outputTokens)
-	// Add cache_read_input_tokens if cached tokens are present (indicates prompt caching is working)
-	if cachedTokens > 0 {
-		var err error
-		responseJSON, err = sjson.Set(responseJSON, "usage.cache_read_input_tokens", cachedTokens)
-		if err != nil {
-			log.Warnf("antigravity claude response: failed to set cache_read_input_tokens: %v", err)
-		}
+	if distributed.CacheCreationInputTokens > 0 {
+		responseJSON, _ = sjson.Set(responseJSON, "usage.cache_creation_input_tokens", distributed.CacheCreationInputTokens)
+	}
+	if distributed.CacheReadInputTokens > 0 {
+		responseJSON, _ = sjson.Set(responseJSON, "usage.cache_read_input_tokens", distributed.CacheReadInputTokens)
 	}
 
 	contentArrayInitialized := false
