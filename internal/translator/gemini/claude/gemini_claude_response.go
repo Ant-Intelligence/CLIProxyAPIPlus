@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -79,8 +80,11 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 		// This follows the Claude API specification for streaming message initialization
 		messageStartTemplate := `{"type": "message_start", "message": {"id": "msg_1nZdL29xx5MUA1yADyHTEsnR8uuvGzszyY", "type": "message", "role": "assistant", "content": [], "model": "claude-3-5-sonnet-20241022", "stop_reason": null, "stop_sequence": null, "usage": {"input_tokens": 0, "output_tokens": 0}}}`
 
-		// Override default values with actual response metadata if available
-		if modelVersionResult := gjson.GetBytes(rawJSON, "modelVersion"); modelVersionResult.Exists() {
+		// Override default model with client's requested model name, falling back to upstream model version
+		requestedModel := gjson.GetBytes(originalRequestRawJSON, "model").String()
+		if requestedModel != "" {
+			messageStartTemplate, _ = sjson.Set(messageStartTemplate, "message.model", requestedModel)
+		} else if modelVersionResult := gjson.GetBytes(rawJSON, "modelVersion"); modelVersionResult.Exists() {
 			messageStartTemplate, _ = sjson.Set(messageStartTemplate, "message.model", modelVersionResult.String())
 		}
 		if responseIDResult := gjson.GetBytes(rawJSON, "responseId"); responseIDResult.Exists() {
@@ -256,8 +260,19 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				}
 
 				thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
+
+				// Apply 1:2:25 cache token distribution
+				promptTokenCount := usageResult.Get("promptTokenCount").Int()
+				distributed := internalusage.DistributeCacheTokens(promptTokenCount)
+
+				template, _ = sjson.Set(template, "usage.input_tokens", distributed.InputTokens)
 				template, _ = sjson.Set(template, "usage.output_tokens", candidatesTokenCountResult.Int()+thoughtsTokenCount)
-				template, _ = sjson.Set(template, "usage.input_tokens", usageResult.Get("promptTokenCount").Int())
+				if distributed.CacheCreationInputTokens > 0 {
+					template, _ = sjson.Set(template, "usage.cache_creation_input_tokens", distributed.CacheCreationInputTokens)
+				}
+				if distributed.CacheReadInputTokens > 0 {
+					template, _ = sjson.Set(template, "usage.cache_read_input_tokens", distributed.CacheReadInputTokens)
+				}
 
 				output = output + template + "\n\n\n"
 			}
@@ -278,19 +293,33 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 // Returns:
 //   - string: A Claude-compatible JSON response.
 func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
-	_ = originalRequestRawJSON
 	_ = requestRawJSON
 
 	root := gjson.ParseBytes(rawJSON)
 
 	out := `{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
 	out, _ = sjson.Set(out, "id", root.Get("responseId").String())
-	out, _ = sjson.Set(out, "model", root.Get("modelVersion").String())
+	requestedModel := gjson.GetBytes(originalRequestRawJSON, "model").String()
+	if requestedModel != "" {
+		out, _ = sjson.Set(out, "model", requestedModel)
+	} else {
+		out, _ = sjson.Set(out, "model", root.Get("modelVersion").String())
+	}
 
 	inputTokens := root.Get("usageMetadata.promptTokenCount").Int()
 	outputTokens := root.Get("usageMetadata.candidatesTokenCount").Int() + root.Get("usageMetadata.thoughtsTokenCount").Int()
-	out, _ = sjson.Set(out, "usage.input_tokens", inputTokens)
+
+	// Apply 1:2:25 cache token distribution
+	distributed := internalusage.DistributeCacheTokens(inputTokens)
+
+	out, _ = sjson.Set(out, "usage.input_tokens", distributed.InputTokens)
 	out, _ = sjson.Set(out, "usage.output_tokens", outputTokens)
+	if distributed.CacheCreationInputTokens > 0 {
+		out, _ = sjson.Set(out, "usage.cache_creation_input_tokens", distributed.CacheCreationInputTokens)
+	}
+	if distributed.CacheReadInputTokens > 0 {
+		out, _ = sjson.Set(out, "usage.cache_read_input_tokens", distributed.CacheReadInputTokens)
+	}
 
 	parts := root.Get("candidates.0.content.parts")
 	textBuilder := strings.Builder{}

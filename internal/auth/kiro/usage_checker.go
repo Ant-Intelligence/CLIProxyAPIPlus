@@ -213,6 +213,60 @@ func (c *UsageChecker) GetQuotaStatus(ctx context.Context, tokenData *KiroTokenD
 	return status, nil
 }
 
+// FetchProfileArn retrieves the profile ARN via ListProfiles API.
+func (c *UsageChecker) FetchProfileArn(ctx context.Context, accessToken string) string {
+	payload := map[string]interface{}{
+		"origin": "AI_EDITOR",
+	}
+
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, strings.NewReader(string(jsonBody)))
+	if err != nil {
+		return ""
+	}
+
+	req.Header.Set("Content-Type", "application/x-amz-json-1.0")
+	req.Header.Set("x-amz-target", "AmazonCodeWhispererService.ListProfiles")
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	var result struct {
+		Profiles []struct {
+			Arn string `json:"arn"`
+		} `json:"profiles"`
+		ProfileArn string `json:"profileArn"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return ""
+	}
+
+	if result.ProfileArn != "" {
+		return result.ProfileArn
+	}
+
+	if len(result.Profiles) > 0 {
+		return result.Profiles[0].Arn
+	}
+
+	return ""
+}
+
 // CalculateAvailableCount calculates the available request count based on usage limits.
 func CalculateAvailableCount(usage *UsageQuotaResponse) float64 {
 	return GetRemainingQuota(usage)
