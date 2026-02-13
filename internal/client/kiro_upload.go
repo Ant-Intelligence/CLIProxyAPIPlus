@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -32,11 +33,35 @@ type KiroInternalCredential struct {
 	ExpiresAt    string `json:"expires_at"`
 	AuthMethod   string `json:"auth_method"`
 	Provider     string `json:"provider"`
-	Region       string `json:"region"`
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
-	StartURL     string `json:"start_url"`
+	Region       string `json:"region,omitempty"`
+	ClientID     string `json:"client_id,omitempty"`
+	ClientSecret string `json:"client_secret,omitempty"`
+	ClientIDHash string `json:"client_id_hash,omitempty"`
+	StartURL     string `json:"start_url,omitempty"`
 	Email        string `json:"email,omitempty"`
+}
+
+// KiroSSOTokenFile represents the AWS SSO token cache file (camelCase).
+// Located at e.g. ~/.aws/sso/cache/kiro-auth-token.json
+type KiroSSOTokenFile struct {
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+	ExpiresAt    string `json:"expiresAt"`
+	AuthMethod   string `json:"authMethod"`
+	Provider     string `json:"provider"`
+	Region       string `json:"region"`
+	ClientID     string `json:"clientId"`
+	ClientSecret string `json:"clientSecret"`
+	ClientIDHash string `json:"clientIdHash"`
+	StartURL     string `json:"startUrl"`
+	Email        string `json:"email"`
+}
+
+// KiroSSOClientFile represents the AWS SSO device registration file.
+// Located at e.g. ~/.aws/sso/cache/{clientIdHash}.json
+type KiroSSOClientFile struct {
+	ClientID     string `json:"clientId"`
+	ClientSecret string `json:"clientSecret"`
 }
 
 // ParseKiroInput accepts JSON that is either a single object or an array of objects.
@@ -144,6 +169,96 @@ func ReadKiroInputFromStdin() ([]byte, error) {
 		return nil, fmt.Errorf("reading stdin: %w", err)
 	}
 	return data, nil
+}
+
+// ReadKiroSSOFiles reads the AWS SSO token file and its companion client file,
+// then merges them into a KiroInternalCredential.
+// If clientPath is empty and the token file contains a clientIdHash,
+// the client file is auto-discovered in the same directory as the token file.
+func ReadKiroSSOFiles(tokenPath, clientPath string) (KiroInternalCredential, error) {
+	tokenPath = ResolvePath(tokenPath)
+
+	tokenData, err := os.ReadFile(tokenPath)
+	if err != nil {
+		return KiroInternalCredential{}, fmt.Errorf("reading token file: %w", err)
+	}
+
+	var token KiroSSOTokenFile
+	if err := json.Unmarshal(tokenData, &token); err != nil {
+		return KiroInternalCredential{}, fmt.Errorf("parsing token file: %w", err)
+	}
+
+	if token.RefreshToken == "" {
+		return KiroInternalCredential{}, fmt.Errorf("token file missing refreshToken")
+	}
+
+	// Merge clientId/clientSecret from the companion client file
+	clientID := token.ClientID
+	clientSecret := token.ClientSecret
+
+	if (clientID == "" || clientSecret == "") && token.ClientIDHash != "" {
+		if clientPath == "" {
+			// Auto-discover: same directory as token file, named {clientIdHash}.json
+			clientPath = filepath.Join(filepath.Dir(tokenPath), token.ClientIDHash+".json")
+		} else {
+			clientPath = ResolvePath(clientPath)
+		}
+
+		clientData, err := os.ReadFile(clientPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: cannot read client file %s: %v\n", clientPath, err)
+			fmt.Fprintln(os.Stderr, "Uploading without client_id/client_secret")
+		} else {
+			var client KiroSSOClientFile
+			if err := json.Unmarshal(clientData, &client); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: cannot parse client file: %v\n", err)
+			} else {
+				clientID = client.ClientID
+				clientSecret = client.ClientSecret
+			}
+		}
+	} else if clientPath != "" {
+		// Explicit client file provided even though token already has credentials
+		clientPath = ResolvePath(clientPath)
+		clientData, err := os.ReadFile(clientPath)
+		if err != nil {
+			return KiroInternalCredential{}, fmt.Errorf("reading client file: %w", err)
+		}
+		var client KiroSSOClientFile
+		if err := json.Unmarshal(clientData, &client); err != nil {
+			return KiroInternalCredential{}, fmt.Errorf("parsing client file: %w", err)
+		}
+		clientID = client.ClientID
+		clientSecret = client.ClientSecret
+	}
+
+	return KiroInternalCredential{
+		Type:         "kiro",
+		AccessToken:  token.AccessToken,
+		RefreshToken: token.RefreshToken,
+		ExpiresAt:    token.ExpiresAt,
+		AuthMethod:   token.AuthMethod,
+		Provider:     token.Provider,
+		Region:       token.Region,
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		ClientIDHash: token.ClientIDHash,
+		StartURL:     token.StartURL,
+		Email:        token.Email,
+	}, nil
+}
+
+// ResolvePath expands ~ to the home directory and converts relative paths to absolute.
+func ResolvePath(p string) string {
+	if strings.HasPrefix(p, "~/") || p == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(home, p[1:])
+		}
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
 }
 
 func sanitizeForFilename(s string) string {

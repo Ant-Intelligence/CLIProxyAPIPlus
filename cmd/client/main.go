@@ -137,17 +137,39 @@ func init() {
 
 // --- upload-kiro command ---
 
-var uploadKiroFileFlag string
+var (
+	uploadKiroFileFlag      string
+	uploadKiroTokenFileFlag string
+	uploadKiroClientFile    string
+	uploadKiroNameFlag      string
+)
 
 var uploadKiroCmd = &cobra.Command{
 	Use:   "upload-kiro",
 	Short: "Upload Kiro credentials to the management API",
-	Long: `Upload Kiro credentials in camelCase JSON format (from Kiro Account Manager)
-to the CLIProxyAPI management server.
+	Long: `Upload Kiro credentials to the CLIProxyAPI management server.
 
-Accepts a JSON array or single object. Reads from --file or stdin.`,
-	Example: `  cpa-client upload-kiro --file credentials.json
-  cpa-client upload-kiro --file credentials.json --server http://127.0.0.1:8317 --api-key KEY
+Two modes:
+
+  1. Kiro Account Manager format (--file):
+     Accepts a JSON array or single object in camelCase format.
+
+  2. AWS SSO cache files (--token-file):
+     Reads the token file and its companion client file (auto-discovered
+     from clientIdHash, or specified with --client-file).
+     Supports both relative and absolute paths, including ~/...
+
+If neither --file nor --token-file is given, reads from stdin.`,
+	Example: `  # Kiro Account Manager format
+  cpa-client upload-kiro --file credentials.json
+
+  # AWS SSO cache files (auto-discover client file from clientIdHash)
+  cpa-client upload-kiro --token-file ~/.aws/sso/cache/kiro-auth-token.json --name kiro-idc.json
+
+  # AWS SSO cache files (explicit client file)
+  cpa-client upload-kiro --token-file ./token.json --client-file ./client.json --name kiro-idc.json
+
+  # Pipe from stdin
   cat credentials.json | cpa-client upload-kiro`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := resolveConfig()
@@ -155,47 +177,99 @@ Accepts a JSON array or single object. Reads from --file or stdin.`,
 			return err
 		}
 
-		var data []byte
-		if uploadKiroFileFlag != "" {
-			data, err = os.ReadFile(uploadKiroFileFlag)
-			if err != nil {
-				return fmt.Errorf("reading file: %w", err)
-			}
-		} else {
-			data, err = client.ReadKiroInputFromStdin()
-			if err != nil {
-				return err
-			}
+		// Mode 2: AWS SSO cache files
+		if uploadKiroTokenFileFlag != "" {
+			return runUploadKiroSSO(cfg)
 		}
 
-		creds, err := client.ParseKiroInput(data)
-		if err != nil {
-			return fmt.Errorf("parsing input: %w", err)
-		}
-
-		if len(creds) == 0 {
-			return fmt.Errorf("no credentials found in input")
-		}
-
-		fmt.Fprintf(os.Stderr, "Found %d credential(s) to upload\n", len(creds))
-
-		for i, ext := range creds {
-			internal := client.ConvertKiroCredential(ext)
-			fileName := client.GenerateKiroFileName(ext, i)
-
-			fmt.Fprintf(os.Stderr, "  [%d/%d] Uploading %s ...", i+1, len(creds), fileName)
-			if err := client.UploadKiroCredential(cfg.Server, cfg.APIKey, fileName, internal); err != nil {
-				fmt.Fprintln(os.Stderr, " FAILED")
-				return fmt.Errorf("uploading %s: %w", fileName, err)
-			}
-			fmt.Fprintln(os.Stderr, " OK")
-		}
-
-		fmt.Fprintf(os.Stderr, "Done. Uploaded %d credential(s).\n", len(creds))
-		return nil
+		// Mode 1: Kiro Account Manager format (--file or stdin)
+		return runUploadKiroAccountManager(cfg)
 	},
 }
 
+func runUploadKiroSSO(cfg client.Config) error {
+	fmt.Fprintln(os.Stderr, "Reading AWS SSO cache files...")
+
+	cred, err := client.ReadKiroSSOFiles(uploadKiroTokenFileFlag, uploadKiroClientFile)
+	if err != nil {
+		return err
+	}
+
+	fileName := uploadKiroNameFlag
+	if fileName == "" {
+		fileName = "kiro-idc.json"
+	}
+
+	fmt.Fprintf(os.Stderr, "  Provider:    %s\n", cred.Provider)
+	fmt.Fprintf(os.Stderr, "  AuthMethod:  %s\n", cred.AuthMethod)
+	fmt.Fprintf(os.Stderr, "  Region:      %s\n", cred.Region)
+	if cred.ClientID != "" {
+		fmt.Fprintln(os.Stderr, "  ClientID:    (present)")
+	}
+	if cred.ClientSecret != "" {
+		fmt.Fprintln(os.Stderr, "  ClientSecret:(present)")
+	}
+
+	fmt.Fprintf(os.Stderr, "Uploading as %s ...", fileName)
+	if err := client.UploadKiroCredential(cfg.Server, cfg.APIKey, fileName, cred); err != nil {
+		fmt.Fprintln(os.Stderr, " FAILED")
+		return fmt.Errorf("uploading %s: %w", fileName, err)
+	}
+	fmt.Fprintln(os.Stderr, " OK")
+	fmt.Fprintln(os.Stderr, "Done.")
+	return nil
+}
+
+func runUploadKiroAccountManager(cfg client.Config) error {
+	var (
+		data []byte
+		err  error
+	)
+	if uploadKiroFileFlag != "" {
+		data, err = os.ReadFile(client.ResolvePath(uploadKiroFileFlag))
+		if err != nil {
+			return fmt.Errorf("reading file: %w", err)
+		}
+	} else {
+		data, err = client.ReadKiroInputFromStdin()
+		if err != nil {
+			return err
+		}
+	}
+
+	creds, err := client.ParseKiroInput(data)
+	if err != nil {
+		return fmt.Errorf("parsing input: %w", err)
+	}
+	if len(creds) == 0 {
+		return fmt.Errorf("no credentials found in input")
+	}
+
+	fmt.Fprintf(os.Stderr, "Found %d credential(s) to upload\n", len(creds))
+
+	for i, ext := range creds {
+		internal := client.ConvertKiroCredential(ext)
+		fileName := uploadKiroNameFlag
+		if fileName == "" {
+			fileName = client.GenerateKiroFileName(ext, i)
+		}
+
+		fmt.Fprintf(os.Stderr, "  [%d/%d] Uploading %s ...", i+1, len(creds), fileName)
+		if err := client.UploadKiroCredential(cfg.Server, cfg.APIKey, fileName, internal); err != nil {
+			fmt.Fprintln(os.Stderr, " FAILED")
+			return fmt.Errorf("uploading %s: %w", fileName, err)
+		}
+		fmt.Fprintln(os.Stderr, " OK")
+	}
+
+	fmt.Fprintf(os.Stderr, "Done. Uploaded %d credential(s).\n", len(creds))
+	return nil
+}
+
 func init() {
-	uploadKiroCmd.Flags().StringVarP(&uploadKiroFileFlag, "file", "f", "", "Path to JSON file with Kiro credentials")
+	uploadKiroCmd.Flags().StringVarP(&uploadKiroFileFlag, "file", "f", "", "Path to Kiro Account Manager JSON file")
+	uploadKiroCmd.Flags().StringVarP(&uploadKiroTokenFileFlag, "token-file", "t", "", "Path to AWS SSO token file (e.g. ~/.aws/sso/cache/kiro-auth-token.json)")
+	uploadKiroCmd.Flags().StringVarP(&uploadKiroClientFile, "client-file", "c", "", "Path to AWS SSO client file (auto-discovered from clientIdHash if omitted)")
+	uploadKiroCmd.Flags().StringVarP(&uploadKiroNameFlag, "name", "n", "", "Upload filename (default: auto-generated or kiro-idc.json)")
+	uploadKiroCmd.MarkFlagsMutuallyExclusive("file", "token-file")
 }
