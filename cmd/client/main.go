@@ -1,136 +1,334 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/client"
+	"github.com/spf13/cobra"
+)
+
+var (
+	flagServer string
+	flagAPIKey string
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(1)
-	}
-
-	switch os.Args[1] {
-	case "config":
-		runConfig(os.Args[2:])
-	case "kiro-usage":
-		runKiroUsage(os.Args[2:])
-	case "help", "-h", "--help":
-		printUsage()
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", os.Args[1])
-		printUsage()
+	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
 }
 
-func printUsage() {
-	fmt.Fprintln(os.Stderr, `cpa-client - CLI client for CLIProxyAPI Plus
-
-Usage:
-  cpa-client <command> [flags]
-
-Commands:
-  config       Save server connection settings
-  kiro-usage   Show Kiro account credit usage
-
-Examples:
-  cpa-client config --server http://127.0.0.1:8317 --api-key YOUR_KEY
-  cpa-client kiro-usage
-  cpa-client kiro-usage --json`)
+var rootCmd = &cobra.Command{
+	Use:   "cpa-client",
+	Short: "CLI client for CLIProxyAPI Plus",
+	Long:  "cpa-client - CLI client for CLIProxyAPI Plus management API",
 }
 
-func runConfig(args []string) {
-	fs := flag.NewFlagSet("config", flag.ExitOnError)
-	server := fs.String("server", "", "Server URL (e.g. http://127.0.0.1:8317)")
-	apiKey := fs.String("api-key", "", "Management API key")
-	fs.Parse(args)
+func init() {
+	rootCmd.PersistentFlags().StringVar(&flagServer, "server", "", "Server URL (e.g. http://127.0.0.1:8317)")
+	rootCmd.PersistentFlags().StringVar(&flagAPIKey, "api-key", "", "Management API key")
 
-	if *server == "" && *apiKey == "" {
-		// Show current config
-		cfg, err := client.LoadConfig()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-			os.Exit(1)
-		}
-		if cfg.Server == "" && cfg.APIKey == "" {
-			fmt.Println("No config saved yet. Use --server and --api-key to set.")
-			return
-		}
-		fmt.Printf("Server:  %s\n", cfg.Server)
-		fmt.Printf("API Key: %s\n", cfg.APIKey)
-		return
-	}
+	rootCmd.AddCommand(configCmd)
+	rootCmd.AddCommand(kiroUsageCmd)
+	rootCmd.AddCommand(uploadKiroCmd)
+	rootCmd.AddCommand(authHealthCmd)
+}
 
+// resolveConfig loads saved config and applies flag overrides.
+// Returns an error if server or apiKey are missing.
+func resolveConfig() (client.Config, error) {
 	cfg, err := client.LoadConfig()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-		os.Exit(1)
+		return client.Config{}, fmt.Errorf("loading config: %w", err)
 	}
-
-	if *server != "" {
-		cfg.Server = *server
+	if flagServer != "" {
+		cfg.Server = flagServer
 	}
-	if *apiKey != "" {
-		cfg.APIKey = *apiKey
+	if flagAPIKey != "" {
+		cfg.APIKey = flagAPIKey
 	}
-
-	if err := client.SaveConfig(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
-		os.Exit(1)
-	}
-
-	path, _ := client.DefaultConfigPath()
-	fmt.Printf("Config saved to %s\n", path)
-}
-
-func runKiroUsage(args []string) {
-	fs := flag.NewFlagSet("kiro-usage", flag.ExitOnError)
-	server := fs.String("server", "", "Server URL (overrides saved config)")
-	apiKey := fs.String("api-key", "", "Management API key (overrides saved config)")
-	jsonOut := fs.Bool("json", false, "Output as JSON")
-	fs.Parse(args)
-
-	cfg, err := client.LoadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Flag overrides take precedence
-	if *server != "" {
-		cfg.Server = *server
-	}
-	if *apiKey != "" {
-		cfg.APIKey = *apiKey
-	}
-
 	if cfg.Server == "" {
-		fmt.Fprintln(os.Stderr, "Error: no server configured. Run: cpa-client config --server URL --api-key KEY")
-		os.Exit(1)
+		return client.Config{}, fmt.Errorf("no server configured. Run: cpa-client config --server URL --api-key KEY")
 	}
 	if cfg.APIKey == "" {
-		fmt.Fprintln(os.Stderr, "Error: no API key configured. Run: cpa-client config --api-key KEY")
-		os.Exit(1)
+		return client.Config{}, fmt.Errorf("no API key configured. Run: cpa-client config --api-key KEY")
 	}
+	return cfg, nil
+}
 
-	accounts, err := client.FetchKiroUsage(cfg.Server, cfg.APIKey)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
+// --- config command ---
 
-	if *jsonOut {
-		if err := client.PrintKiroUsageJSON(accounts); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+var configCmd = &cobra.Command{
+	Use:   "config",
+	Short: "Save or display server connection settings",
+	Long: `Save or display server connection settings.
+
+When called without flags, displays the current saved config.
+When called with --server and/or --api-key, saves them for future use.`,
+	Example: `  cpa-client config --server http://127.0.0.1:8317 --api-key YOUR_KEY
+  cpa-client config`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if flagServer == "" && flagAPIKey == "" {
+			cfg, err := client.LoadConfig()
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
+			}
+			if cfg.Server == "" && cfg.APIKey == "" {
+				fmt.Println("No config saved yet. Use --server and --api-key to set.")
+				return nil
+			}
+			fmt.Printf("Server:  %s\n", cfg.Server)
+			fmt.Printf("API Key: %s\n", cfg.APIKey)
+			return nil
 		}
-		return
+
+		cfg, err := client.LoadConfig()
+		if err != nil {
+			return fmt.Errorf("loading config: %w", err)
+		}
+		if flagServer != "" {
+			cfg.Server = flagServer
+		}
+		if flagAPIKey != "" {
+			cfg.APIKey = flagAPIKey
+		}
+
+		if err := client.SaveConfig(cfg); err != nil {
+			return fmt.Errorf("saving config: %w", err)
+		}
+		path, _ := client.DefaultConfigPath()
+		fmt.Printf("Config saved to %s\n", path)
+		return nil
+	},
+}
+
+// --- kiro-usage command ---
+
+var kiroUsageJSONFlag bool
+
+var kiroUsageCmd = &cobra.Command{
+	Use:   "kiro-usage",
+	Short: "Show Kiro account credit usage",
+	Example: `  cpa-client kiro-usage
+  cpa-client kiro-usage --json
+  cpa-client kiro-usage --server http://127.0.0.1:8317 --api-key KEY`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := resolveConfig()
+		if err != nil {
+			return err
+		}
+
+		accounts, err := client.FetchKiroUsage(cfg.Server, cfg.APIKey)
+		if err != nil {
+			return err
+		}
+
+		if kiroUsageJSONFlag {
+			return client.PrintKiroUsageJSON(accounts)
+		}
+		client.PrintKiroUsageTable(accounts)
+		return nil
+	},
+}
+
+func init() {
+	kiroUsageCmd.Flags().BoolVar(&kiroUsageJSONFlag, "json", false, "Output as JSON")
+}
+
+// --- upload-kiro command ---
+
+var (
+	uploadKiroFileFlag      string
+	uploadKiroTokenFileFlag string
+	uploadKiroClientFile    string
+	uploadKiroNameFlag      string
+)
+
+var uploadKiroCmd = &cobra.Command{
+	Use:   "upload-kiro",
+	Short: "Upload Kiro credentials to the management API",
+	Long: `Upload Kiro credentials to the CLIProxyAPI management server.
+
+Two modes:
+
+  1. Kiro Account Manager format (--file):
+     Accepts a JSON array or single object in camelCase format.
+
+  2. AWS SSO cache files (--token-file):
+     Reads the token file and its companion client file (auto-discovered
+     from clientIdHash, or specified with --client-file).
+     Supports both relative and absolute paths, including ~/...
+
+If neither --file nor --token-file is given, reads from stdin.`,
+	Example: `  # Kiro Account Manager format
+  cpa-client upload-kiro --file credentials.json
+
+  # AWS SSO cache files (auto-discover client file from clientIdHash)
+  cpa-client upload-kiro --token-file ~/.aws/sso/cache/kiro-auth-token.json --name kiro-idc.json
+
+  # AWS SSO cache files (explicit client file)
+  cpa-client upload-kiro --token-file ./token.json --client-file ./client.json --name kiro-idc.json
+
+  # Pipe from stdin
+  cat credentials.json | cpa-client upload-kiro`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := resolveConfig()
+		if err != nil {
+			return err
+		}
+
+		// Mode 2: AWS SSO cache files
+		if uploadKiroTokenFileFlag != "" {
+			return runUploadKiroSSO(cfg)
+		}
+
+		// Mode 1: Kiro Account Manager format (--file or stdin)
+		return runUploadKiroAccountManager(cfg)
+	},
+}
+
+func runUploadKiroSSO(cfg client.Config) error {
+	fmt.Fprintln(os.Stderr, "Reading AWS SSO cache files...")
+
+	cred, err := client.ReadKiroSSOFiles(uploadKiroTokenFileFlag, uploadKiroClientFile)
+	if err != nil {
+		return err
 	}
 
-	client.PrintKiroUsageTable(accounts)
+	fileName := uploadKiroNameFlag
+	if fileName == "" {
+		fileName = "kiro-idc.json"
+	}
+
+	fmt.Fprintf(os.Stderr, "  Provider:    %s\n", cred.Provider)
+	fmt.Fprintf(os.Stderr, "  AuthMethod:  %s\n", cred.AuthMethod)
+	fmt.Fprintf(os.Stderr, "  Region:      %s\n", cred.Region)
+	if cred.ClientID != "" {
+		fmt.Fprintln(os.Stderr, "  ClientID:    (present)")
+	}
+	if cred.ClientSecret != "" {
+		fmt.Fprintln(os.Stderr, "  ClientSecret:(present)")
+	}
+
+	fmt.Fprintf(os.Stderr, "Uploading as %s ...", fileName)
+	if err := client.UploadKiroCredential(cfg.Server, cfg.APIKey, fileName, cred); err != nil {
+		fmt.Fprintln(os.Stderr, " FAILED")
+		return fmt.Errorf("uploading %s: %w", fileName, err)
+	}
+	fmt.Fprintln(os.Stderr, " OK")
+	fmt.Fprintln(os.Stderr, "Done.")
+	return nil
+}
+
+func runUploadKiroAccountManager(cfg client.Config) error {
+	var (
+		data []byte
+		err  error
+	)
+	var sourceBaseName string
+	if uploadKiroFileFlag != "" {
+		resolvedPath := client.ResolvePath(uploadKiroFileFlag)
+		data, err = os.ReadFile(resolvedPath)
+		if err != nil {
+			return fmt.Errorf("reading file: %w", err)
+		}
+		sourceBaseName = filepath.Base(resolvedPath)
+	} else {
+		data, err = client.ReadKiroInputFromStdin()
+		if err != nil {
+			return err
+		}
+	}
+
+	creds, err := client.ParseKiroInput(data)
+	if err != nil {
+		return fmt.Errorf("parsing input: %w", err)
+	}
+	if len(creds) == 0 {
+		return fmt.Errorf("no credentials found in input")
+	}
+
+	fmt.Fprintf(os.Stderr, "Found %d credential(s) to upload\n", len(creds))
+
+	for i, ext := range creds {
+		internal := client.ConvertKiroCredential(ext)
+		fileName := uploadKiroNameFlag
+		if fileName == "" && sourceBaseName != "" {
+			fileName = sourceBaseName
+		}
+		if fileName == "" {
+			fileName = client.GenerateKiroFileName(ext, i)
+		}
+		// When multiple credentials share the same base name, append index to avoid collisions.
+		if len(creds) > 1 && fileName != "" {
+			ext := filepath.Ext(fileName)
+			base := strings.TrimSuffix(fileName, ext)
+			fileName = fmt.Sprintf("%s-%d%s", base, i+1, ext)
+		}
+
+		fmt.Fprintf(os.Stderr, "  [%d/%d] Uploading %s ...", i+1, len(creds), fileName)
+		if err := client.UploadKiroCredential(cfg.Server, cfg.APIKey, fileName, internal); err != nil {
+			fmt.Fprintln(os.Stderr, " FAILED")
+			return fmt.Errorf("uploading %s: %w", fileName, err)
+		}
+		fmt.Fprintln(os.Stderr, " OK")
+	}
+
+	fmt.Fprintf(os.Stderr, "Done. Uploaded %d credential(s).\n", len(creds))
+	return nil
+}
+
+func init() {
+	uploadKiroCmd.Flags().StringVarP(&uploadKiroFileFlag, "file", "f", "", "Path to Kiro Account Manager JSON file")
+	uploadKiroCmd.Flags().StringVarP(&uploadKiroTokenFileFlag, "token-file", "t", "", "Path to AWS SSO token file (e.g. ~/.aws/sso/cache/kiro-auth-token.json)")
+	uploadKiroCmd.Flags().StringVarP(&uploadKiroClientFile, "client-file", "c", "", "Path to AWS SSO client file (auto-discovered from clientIdHash if omitted)")
+	uploadKiroCmd.Flags().StringVarP(&uploadKiroNameFlag, "name", "n", "", "Upload filename (default: auto-generated or kiro-idc.json)")
+	uploadKiroCmd.MarkFlagsMutuallyExclusive("file", "token-file")
+}
+
+// --- auth-health command ---
+
+var (
+	authHealthProviderFlag string
+	authHealthJSONFlag     bool
+)
+
+var authHealthCmd = &cobra.Command{
+	Use:   "auth-health",
+	Short: "Check health status of OAuth accounts",
+	Long: `Check health status of OAuth accounts registered in the proxy server.
+
+By default checks antigravity accounts. Use --provider to filter by provider type.`,
+	Example: `  cpa-client auth-health
+  cpa-client auth-health --provider gemini
+  cpa-client auth-health --provider ""
+  cpa-client auth-health --json
+  cpa-client auth-health --server http://127.0.0.1:8317 --api-key KEY`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := resolveConfig()
+		if err != nil {
+			return err
+		}
+
+		entries, err := client.FetchAuthFiles(cfg.Server, cfg.APIKey)
+		if err != nil {
+			return err
+		}
+
+		filtered := client.FilterByProvider(entries, authHealthProviderFlag)
+
+		if authHealthJSONFlag {
+			return client.PrintAuthHealthJSON(filtered)
+		}
+		client.PrintAuthHealthTable(filtered, authHealthProviderFlag)
+		return nil
+	},
+}
+
+func init() {
+	authHealthCmd.Flags().StringVarP(&authHealthProviderFlag, "provider", "p", "antigravity", `Provider filter (e.g. antigravity, gemini, claude, codex, kiro). Use "" for all`)
+	authHealthCmd.Flags().BoolVar(&authHealthJSONFlag, "json", false, "Output as JSON")
 }
