@@ -104,7 +104,9 @@ func ConvertKiroCredential(ext KiroExternalCredential) KiroInternalCredential {
 }
 
 // GenerateKiroFileName produces a filename like kiro-<provider>-<identifier>.json.
-// Priority: email > startUrl hostname > fallback index.
+// Priority: email > startUrl hostname + clientId suffix > fallback index.
+// When multiple accounts share the same startUrl, the clientId prefix is appended
+// to avoid filename collisions.
 func GenerateKiroFileName(cred KiroExternalCredential, index int) string {
 	provider := cred.Provider
 	if provider == "" {
@@ -118,6 +120,13 @@ func GenerateKiroFileName(cred KiroExternalCredential, index int) string {
 	case cred.StartURL != "":
 		if u, err := url.Parse(cred.StartURL); err == nil && u.Hostname() != "" {
 			identifier = sanitizeForFilename(u.Hostname())
+			if cred.ClientID != "" {
+				suffix := sanitizeForFilename(cred.ClientID)
+				if len(suffix) > 8 {
+					suffix = suffix[:8]
+				}
+				identifier = identifier + "-" + suffix
+			}
 		}
 	}
 	if identifier == "" {

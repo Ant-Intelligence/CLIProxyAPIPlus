@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/client"
 	"github.com/spf13/cobra"
@@ -32,6 +34,7 @@ func init() {
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(kiroUsageCmd)
 	rootCmd.AddCommand(uploadKiroCmd)
+	rootCmd.AddCommand(authHealthCmd)
 }
 
 // resolveConfig loads saved config and applies flag overrides.
@@ -225,11 +228,14 @@ func runUploadKiroAccountManager(cfg client.Config) error {
 		data []byte
 		err  error
 	)
+	var sourceBaseName string
 	if uploadKiroFileFlag != "" {
-		data, err = os.ReadFile(client.ResolvePath(uploadKiroFileFlag))
+		resolvedPath := client.ResolvePath(uploadKiroFileFlag)
+		data, err = os.ReadFile(resolvedPath)
 		if err != nil {
 			return fmt.Errorf("reading file: %w", err)
 		}
+		sourceBaseName = filepath.Base(resolvedPath)
 	} else {
 		data, err = client.ReadKiroInputFromStdin()
 		if err != nil {
@@ -250,8 +256,17 @@ func runUploadKiroAccountManager(cfg client.Config) error {
 	for i, ext := range creds {
 		internal := client.ConvertKiroCredential(ext)
 		fileName := uploadKiroNameFlag
+		if fileName == "" && sourceBaseName != "" {
+			fileName = sourceBaseName
+		}
 		if fileName == "" {
 			fileName = client.GenerateKiroFileName(ext, i)
+		}
+		// When multiple credentials share the same base name, append index to avoid collisions.
+		if len(creds) > 1 && fileName != "" {
+			ext := filepath.Ext(fileName)
+			base := strings.TrimSuffix(fileName, ext)
+			fileName = fmt.Sprintf("%s-%d%s", base, i+1, ext)
 		}
 
 		fmt.Fprintf(os.Stderr, "  [%d/%d] Uploading %s ...", i+1, len(creds), fileName)
@@ -272,4 +287,48 @@ func init() {
 	uploadKiroCmd.Flags().StringVarP(&uploadKiroClientFile, "client-file", "c", "", "Path to AWS SSO client file (auto-discovered from clientIdHash if omitted)")
 	uploadKiroCmd.Flags().StringVarP(&uploadKiroNameFlag, "name", "n", "", "Upload filename (default: auto-generated or kiro-idc.json)")
 	uploadKiroCmd.MarkFlagsMutuallyExclusive("file", "token-file")
+}
+
+// --- auth-health command ---
+
+var (
+	authHealthProviderFlag string
+	authHealthJSONFlag     bool
+)
+
+var authHealthCmd = &cobra.Command{
+	Use:   "auth-health",
+	Short: "Check health status of OAuth accounts",
+	Long: `Check health status of OAuth accounts registered in the proxy server.
+
+By default checks antigravity accounts. Use --provider to filter by provider type.`,
+	Example: `  cpa-client auth-health
+  cpa-client auth-health --provider gemini
+  cpa-client auth-health --provider ""
+  cpa-client auth-health --json
+  cpa-client auth-health --server http://127.0.0.1:8317 --api-key KEY`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := resolveConfig()
+		if err != nil {
+			return err
+		}
+
+		entries, err := client.FetchAuthFiles(cfg.Server, cfg.APIKey)
+		if err != nil {
+			return err
+		}
+
+		filtered := client.FilterByProvider(entries, authHealthProviderFlag)
+
+		if authHealthJSONFlag {
+			return client.PrintAuthHealthJSON(filtered)
+		}
+		client.PrintAuthHealthTable(filtered, authHealthProviderFlag)
+		return nil
+	},
+}
+
+func init() {
+	authHealthCmd.Flags().StringVarP(&authHealthProviderFlag, "provider", "p", "antigravity", `Provider filter (e.g. antigravity, gemini, claude, codex, kiro). Use "" for all`)
+	authHealthCmd.Flags().BoolVar(&authHealthJSONFlag, "json", false, "Output as JSON")
 }

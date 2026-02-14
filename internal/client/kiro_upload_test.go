@@ -123,11 +123,42 @@ func TestGenerateKiroFileName_WithStartURL(t *testing.T) {
 	cred := KiroExternalCredential{
 		Provider: "idc",
 		StartURL: "https://myorg.awsapps.com/start",
+		ClientID: "f_R3uaW3B0d6cor4",
+	}
+	got := GenerateKiroFileName(cred, 0)
+	want := "kiro-idc-myorg.awsapps.com-f-r3uaw3.json"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestGenerateKiroFileName_StartURLWithoutClientID(t *testing.T) {
+	cred := KiroExternalCredential{
+		Provider: "idc",
+		StartURL: "https://myorg.awsapps.com/start",
 	}
 	got := GenerateKiroFileName(cred, 0)
 	want := "kiro-idc-myorg.awsapps.com.json"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestGenerateKiroFileName_SameStartURLDifferentClientID(t *testing.T) {
+	cred1 := KiroExternalCredential{
+		Provider: "Enterprise",
+		StartURL: "https://d-9066017a60.awsapps.com/start/",
+		ClientID: "f_R3uaW3B0d6cor4MeoTFXVzLWVhc3QtMQ",
+	}
+	cred2 := KiroExternalCredential{
+		Provider: "Enterprise",
+		StartURL: "https://d-9066017a60.awsapps.com/start/",
+		ClientID: "g_X5abCD7E8f9ghi",
+	}
+	name1 := GenerateKiroFileName(cred1, 0)
+	name2 := GenerateKiroFileName(cred2, 1)
+	if name1 == name2 {
+		t.Errorf("filenames should differ for different clientIDs under same startUrl, both got %q", name1)
 	}
 }
 
