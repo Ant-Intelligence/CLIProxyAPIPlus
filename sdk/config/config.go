@@ -28,6 +28,7 @@ type VertexCompatModel = internalconfig.VertexCompatModel
 type OpenAICompatibility = internalconfig.OpenAICompatibility
 type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
+type WebhookEntry = internalconfig.WebhookEntry
 
 type TLS = internalconfig.TLSConfig
 

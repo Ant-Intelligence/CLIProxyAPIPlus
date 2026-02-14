@@ -53,6 +53,17 @@ commercial-mode: false
 # Default: false (but Kiro auth defaults to true for multi-account support)
 incognito-browser: true
 
+# Webhook alerting for account ban and rate-limiting events.
+# Sends notifications to external systems (e.g., WeChat Work) when accounts are banned (403)
+# or rate-limited (429).
+# webhooks:
+#   - url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY"
+#     type: "wecom"              # Webhook provider type. Default: "wecom"
+#     events:                    # Events to alert on. Default: ["account_banned"]
+#       - "account_banned"       # 403 with ban keywords (disabled, violation, suspended, banned, terminated)
+#       - "rate_limited"         # 429 quota exceeded
+#     throttle-minutes: 10       # Min interval between same auth+event alerts. Default: 10
+
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
 
