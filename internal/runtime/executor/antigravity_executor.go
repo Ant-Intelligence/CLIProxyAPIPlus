@@ -201,6 +201,10 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
+				if antigravityIsAccountBanned(httpResp.StatusCode, bodyBytes) {
+					log.Errorf("antigravity executor: account banned for %s: %s", auth.ID, summarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes))
+					return resp, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+				}
 				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 					continue
@@ -355,6 +359,10 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
+				if antigravityIsAccountBanned(httpResp.StatusCode, bodyBytes) {
+					log.Errorf("antigravity executor: account banned for %s: %s", auth.ID, summarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes))
+					return resp, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+				}
 				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 					continue
@@ -746,6 +754,10 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
+				if antigravityIsAccountBanned(httpResp.StatusCode, bodyBytes) {
+					log.Errorf("antigravity executor: account banned for %s: %s", auth.ID, summarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes))
+					return nil, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+				}
 				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 					continue
@@ -974,6 +986,10 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		lastStatus = httpResp.StatusCode
 		lastBody = append([]byte(nil), bodyBytes...)
 		lastErr = nil
+		if antigravityIsAccountBanned(httpResp.StatusCode, bodyBytes) {
+			log.Errorf("antigravity executor: account banned for %s: %s", auth.ID, summarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes))
+			return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+		}
 		if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 			log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 			continue
@@ -1059,6 +1075,10 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 			return nil
 		}
 		if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+			if antigravityIsAccountBanned(httpResp.StatusCode, bodyBytes) {
+				log.Errorf("antigravity executor: account banned for %s: %s", auth.ID, string(bodyBytes))
+				return nil
+			}
 			if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 				log.Debugf("antigravity executor: models request rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
@@ -1474,6 +1494,22 @@ func antigravityRetryAttempts(auth *cliproxyauth.Auth, cfg *config.Config) int {
 		return 1
 	}
 	return attempts
+}
+
+// antigravityIsAccountBanned checks if a 403 response indicates an account ban.
+// Google returns 403 with "disabled" + "violation" for banned accounts.
+// Rate limiting uses 429, so a 403 is a strong ban signal.
+func antigravityIsAccountBanned(statusCode int, body []byte) bool {
+	if statusCode != http.StatusForbidden {
+		return false
+	}
+	if len(body) == 0 {
+		return false
+	}
+	msg := strings.ToLower(string(body))
+	return strings.Contains(msg, "disabled") || strings.Contains(msg, "violation") ||
+		strings.Contains(msg, "suspended") || strings.Contains(msg, "banned") ||
+		strings.Contains(msg, "terminated")
 }
 
 func antigravityShouldRetryNoCapacity(statusCode int, body []byte) bool {
