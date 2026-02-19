@@ -3,6 +3,7 @@ package kiro
 import (
 	"encoding/base64"
 	"encoding/json"
+	"regexp"
 	"testing"
 )
 
@@ -217,7 +218,8 @@ func TestGenerateTokenFileName(t *testing.T) {
 	tests := []struct {
 		name      string
 		tokenData *KiroTokenData
-		expected  string
+		expected  string // exact match for email-based filenames
+		pattern   string // regex pattern for sequence-suffixed filenames
 	}{
 		{
 			name: "IDC with email",
@@ -235,7 +237,7 @@ func TestGenerateTokenFileName(t *testing.T) {
 				Email:      "",
 				StartURL:   "https://d-1234567890.awsapps.com/start",
 			},
-			expected: "kiro-idc-d-1234567890.json",
+			pattern: `^kiro-idc-d-1234567890-\d{5}\.json$`,
 		},
 		{
 			name: "IDC with company name in startUrl",
@@ -244,7 +246,7 @@ func TestGenerateTokenFileName(t *testing.T) {
 				Email:      "",
 				StartURL:   "https://my-company.awsapps.com/start",
 			},
-			expected: "kiro-idc-my-company.json",
+			pattern: `^kiro-idc-my-company-\d{5}\.json$`,
 		},
 		{
 			name: "IDC without email and without startUrl",
@@ -253,7 +255,7 @@ func TestGenerateTokenFileName(t *testing.T) {
 				Email:      "",
 				StartURL:   "",
 			},
-			expected: "kiro-idc.json",
+			pattern: `^kiro-idc-\d{5}\.json$`,
 		},
 		{
 			name: "Builder ID with email",
@@ -271,7 +273,7 @@ func TestGenerateTokenFileName(t *testing.T) {
 				Email:      "",
 				StartURL:   "https://view.awsapps.com/start",
 			},
-			expected: "kiro-builder-id.json",
+			pattern: `^kiro-builder-id-\d{5}\.json$`,
 		},
 		{
 			name: "Social auth with email",
@@ -287,7 +289,7 @@ func TestGenerateTokenFileName(t *testing.T) {
 				AuthMethod: "",
 				Email:      "",
 			},
-			expected: "kiro-unknown.json",
+			pattern: `^kiro-unknown-\d{5}\.json$`,
 		},
 		{
 			name: "Email with special characters",
@@ -303,7 +305,15 @@ func TestGenerateTokenFileName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := GenerateTokenFileName(tt.tokenData)
-			if result != tt.expected {
+			if tt.pattern != "" {
+				matched, err := regexp.MatchString(tt.pattern, result)
+				if err != nil {
+					t.Fatalf("invalid pattern %q: %v", tt.pattern, err)
+				}
+				if !matched {
+					t.Errorf("GenerateTokenFileName() = %q, want match for pattern %q", result, tt.pattern)
+				}
+			} else if result != tt.expected {
 				t.Errorf("GenerateTokenFileName() = %q, want %q", result, tt.expected)
 			}
 		})
