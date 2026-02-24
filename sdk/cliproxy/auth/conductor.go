@@ -1255,11 +1255,25 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					state.NextRetryAfter = next
 					suspendReason = "unauthorized"
 					shouldSuspendModel = true
-				case 402, 403:
+				case 402:
 					next := now.Add(30 * time.Minute)
 					state.NextRetryAfter = next
 					suspendReason = "payment_required"
 					shouldSuspendModel = true
+				case 403:
+					if isAccountBannedError(result.Error) {
+						next := now.Add(24 * time.Hour)
+						state.NextRetryAfter = next
+						suspendReason = "account_banned"
+						shouldSuspendModel = true
+						auth.Unavailable = true
+						auth.StatusMessage = "account banned"
+					} else {
+						next := now.Add(30 * time.Minute)
+						state.NextRetryAfter = next
+						suspendReason = "forbidden"
+						shouldSuspendModel = true
+					}
 				case 404:
 					next := now.Add(12 * time.Hour)
 					state.NextRetryAfter = next
@@ -1516,6 +1530,17 @@ func isRequestInvalidError(err error) bool {
 	return strings.Contains(err.Error(), "invalid_request_error")
 }
 
+// isAccountBannedError checks if an error message indicates an account ban/suspension.
+func isAccountBannedError(resultErr *Error) bool {
+	if resultErr == nil || resultErr.Message == "" {
+		return false
+	}
+	msg := strings.ToLower(resultErr.Message)
+	return strings.Contains(msg, "disabled") || strings.Contains(msg, "violation") ||
+		strings.Contains(msg, "suspended") || strings.Contains(msg, "banned") ||
+		strings.Contains(msg, "terminated")
+}
+
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
 	if auth == nil {
 		return
@@ -1534,9 +1559,17 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	case 401:
 		auth.StatusMessage = "unauthorized"
 		auth.NextRetryAfter = now.Add(30 * time.Minute)
-	case 402, 403:
+	case 402:
 		auth.StatusMessage = "payment_required"
 		auth.NextRetryAfter = now.Add(30 * time.Minute)
+	case 403:
+		if isAccountBannedError(resultErr) {
+			auth.StatusMessage = "account banned"
+			auth.NextRetryAfter = now.Add(24 * time.Hour)
+		} else {
+			auth.StatusMessage = "forbidden"
+			auth.NextRetryAfter = now.Add(30 * time.Minute)
+		}
 	case 404:
 		auth.StatusMessage = "not_found"
 		auth.NextRetryAfter = now.Add(12 * time.Hour)

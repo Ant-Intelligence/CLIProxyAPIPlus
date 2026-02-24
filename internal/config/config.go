@@ -131,7 +131,24 @@ type Config struct {
 	// from your current session. Default: false.
 	IncognitoBrowser bool `yaml:"incognito-browser" json:"incognito-browser"`
 
+	// Webhooks defines external webhook endpoints for alerting on events
+	// such as account bans and rate limiting.
+	Webhooks []WebhookEntry `yaml:"webhooks,omitempty" json:"webhooks,omitempty"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+}
+
+// WebhookEntry configures a single webhook destination for event alerts.
+type WebhookEntry struct {
+	// URL is the webhook endpoint (e.g. WeChat Work group bot URL).
+	URL string `yaml:"url" json:"url"`
+	// Type is the webhook provider type. Default: "wecom".
+	Type string `yaml:"type,omitempty" json:"type,omitempty"`
+	// Events lists the event types to send. Default: ["account_banned"].
+	Events []string `yaml:"events,omitempty" json:"events,omitempty"`
+	// ThrottleMinutes is the minimum interval in minutes between alerts
+	// for the same auth+event combination. Default: 10.
+	ThrottleMinutes int `yaml:"throttle-minutes,omitempty" json:"throttle-minutes,omitempty"`
 }
 
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests

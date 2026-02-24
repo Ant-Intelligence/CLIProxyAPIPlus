@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -64,7 +65,12 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	template := ""
 	if typeStr == "response.created" {
 		template = `{"type":"message_start","message":{"id":"","type":"message","role":"assistant","model":"claude-opus-4-1-20250805","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0},"content":[],"stop_reason":null}}`
-		template, _ = sjson.Set(template, "message.model", rootResult.Get("response.model").String())
+		requestedModel := gjson.GetBytes(originalRequestRawJSON, "model").String()
+		if requestedModel != "" {
+			template, _ = sjson.Set(template, "message.model", requestedModel)
+		} else {
+			template, _ = sjson.Set(template, "message.model", rootResult.Get("response.model").String())
+		}
 		template, _ = sjson.Set(template, "message.id", rootResult.Get("response.id").String())
 
 		output = "event: message_start\n"
@@ -122,10 +128,18 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			template, _ = sjson.Set(template, "delta.stop_reason", "end_turn")
 		}
 		inputTokens, outputTokens, cachedTokens := extractResponsesUsage(rootResult.Get("response.usage"))
-		template, _ = sjson.Set(template, "usage.input_tokens", inputTokens)
+
+		// Apply 1:2:25 cache token distribution
+		totalInputTokens := inputTokens + cachedTokens
+		distributed := internalusage.DistributeCacheTokens(totalInputTokens)
+
+		template, _ = sjson.Set(template, "usage.input_tokens", distributed.InputTokens)
 		template, _ = sjson.Set(template, "usage.output_tokens", outputTokens)
-		if cachedTokens > 0 {
-			template, _ = sjson.Set(template, "usage.cache_read_input_tokens", cachedTokens)
+		if distributed.CacheCreationInputTokens > 0 {
+			template, _ = sjson.Set(template, "usage.cache_creation_input_tokens", distributed.CacheCreationInputTokens)
+		}
+		if distributed.CacheReadInputTokens > 0 {
+			template, _ = sjson.Set(template, "usage.cache_read_input_tokens", distributed.CacheReadInputTokens)
 		}
 
 		output = "event: message_delta\n"
@@ -229,12 +243,26 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 
 	out := `{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
 	out, _ = sjson.Set(out, "id", responseData.Get("id").String())
-	out, _ = sjson.Set(out, "model", responseData.Get("model").String())
+	requestedModel := gjson.GetBytes(originalRequestRawJSON, "model").String()
+	if requestedModel != "" {
+		out, _ = sjson.Set(out, "model", requestedModel)
+	} else {
+		out, _ = sjson.Set(out, "model", responseData.Get("model").String())
+	}
+
 	inputTokens, outputTokens, cachedTokens := extractResponsesUsage(responseData.Get("usage"))
-	out, _ = sjson.Set(out, "usage.input_tokens", inputTokens)
+
+	// Apply 1:2:25 cache token distribution
+	totalInputTokens := inputTokens + cachedTokens
+	distributed := internalusage.DistributeCacheTokens(totalInputTokens)
+
+	out, _ = sjson.Set(out, "usage.input_tokens", distributed.InputTokens)
 	out, _ = sjson.Set(out, "usage.output_tokens", outputTokens)
-	if cachedTokens > 0 {
-		out, _ = sjson.Set(out, "usage.cache_read_input_tokens", cachedTokens)
+	if distributed.CacheCreationInputTokens > 0 {
+		out, _ = sjson.Set(out, "usage.cache_creation_input_tokens", distributed.CacheCreationInputTokens)
+	}
+	if distributed.CacheReadInputTokens > 0 {
+		out, _ = sjson.Set(out, "usage.cache_read_input_tokens", distributed.CacheReadInputTokens)
 	}
 
 	hasToolCall := false

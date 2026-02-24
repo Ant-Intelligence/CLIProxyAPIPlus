@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -92,6 +93,14 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 		}
 	}
 
+	// Pre-populate Model from client request so streaming chunks use the requested model name
+	p := (*param).(*ConvertOpenAIResponseToAnthropicParams)
+	if p.Model == "" {
+		if requestedModel := gjson.GetBytes(originalRequestRawJSON, "model").String(); requestedModel != "" {
+			p.Model = requestedModel
+		}
+	}
+
 	if !bytes.HasPrefix(rawJSON, dataTag) {
 		return []string{}
 	}
@@ -105,7 +114,12 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 
 	streamResult := gjson.GetBytes(originalRequestRawJSON, "stream")
 	if !streamResult.Exists() || (streamResult.Exists() && streamResult.Type == gjson.False) {
-		return convertOpenAINonStreamingToAnthropic(rawJSON)
+		results := convertOpenAINonStreamingToAnthropic(rawJSON)
+		requestedModel := gjson.GetBytes(originalRequestRawJSON, "model").String()
+		if requestedModel != "" && len(results) > 0 {
+			results[0], _ = sjson.Set(results[0], "model", requestedModel)
+		}
+		return results
 	} else {
 		return convertOpenAIStreamingChunkToAnthropic(rawJSON, (*param).(*ConvertOpenAIResponseToAnthropicParams))
 	}
@@ -292,13 +306,21 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 		var inputTokens, outputTokens, cachedTokens int64
 		if usage.Exists() && usage.Type != gjson.Null {
 			inputTokens, outputTokens, cachedTokens = extractOpenAIUsage(usage)
+
+			// Apply 1:2:25 cache token distribution
+			totalInputTokens := inputTokens + cachedTokens
+			distributed := internalusage.DistributeCacheTokens(totalInputTokens)
+
 			// Send message_delta with usage
 			messageDeltaJSON := `{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
 			messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "delta.stop_reason", mapOpenAIFinishReasonToAnthropic(param.FinishReason))
-			messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "usage.input_tokens", inputTokens)
+			messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "usage.input_tokens", distributed.InputTokens)
 			messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "usage.output_tokens", outputTokens)
-			if cachedTokens > 0 {
-				messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "usage.cache_read_input_tokens", cachedTokens)
+			if distributed.CacheCreationInputTokens > 0 {
+				messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "usage.cache_creation_input_tokens", distributed.CacheCreationInputTokens)
+			}
+			if distributed.CacheReadInputTokens > 0 {
+				messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "usage.cache_read_input_tokens", distributed.CacheReadInputTokens)
 			}
 			results = append(results, "event: message_delta\ndata: "+messageDeltaJSON+"\n\n")
 			param.MessageDeltaSent = true
@@ -420,10 +442,18 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) []string {
 	// Set usage information
 	if usage := root.Get("usage"); usage.Exists() {
 		inputTokens, outputTokens, cachedTokens := extractOpenAIUsage(usage)
-		out, _ = sjson.Set(out, "usage.input_tokens", inputTokens)
+
+		// Apply 1:2:25 cache token distribution
+		totalInputTokens := inputTokens + cachedTokens
+		distributed := internalusage.DistributeCacheTokens(totalInputTokens)
+
+		out, _ = sjson.Set(out, "usage.input_tokens", distributed.InputTokens)
 		out, _ = sjson.Set(out, "usage.output_tokens", outputTokens)
-		if cachedTokens > 0 {
-			out, _ = sjson.Set(out, "usage.cache_read_input_tokens", cachedTokens)
+		if distributed.CacheCreationInputTokens > 0 {
+			out, _ = sjson.Set(out, "usage.cache_creation_input_tokens", distributed.CacheCreationInputTokens)
+		}
+		if distributed.CacheReadInputTokens > 0 {
+			out, _ = sjson.Set(out, "usage.cache_read_input_tokens", distributed.CacheReadInputTokens)
 		}
 	}
 
@@ -531,13 +561,17 @@ func stopTextContentBlock(param *ConvertOpenAIResponseToAnthropicParams, results
 // Returns:
 //   - string: An Anthropic-compatible JSON response.
 func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
-	_ = originalRequestRawJSON
 	_ = requestRawJSON
 
 	root := gjson.ParseBytes(rawJSON)
 	out := `{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
 	out, _ = sjson.Set(out, "id", root.Get("id").String())
-	out, _ = sjson.Set(out, "model", root.Get("model").String())
+	requestedModel := gjson.GetBytes(originalRequestRawJSON, "model").String()
+	if requestedModel != "" {
+		out, _ = sjson.Set(out, "model", requestedModel)
+	} else {
+		out, _ = sjson.Set(out, "model", root.Get("model").String())
+	}
 
 	hasToolCall := false
 	stopReasonSet := false
@@ -670,10 +704,18 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 	if respUsage := root.Get("usage"); respUsage.Exists() {
 		inputTokens, outputTokens, cachedTokens := extractOpenAIUsage(respUsage)
-		out, _ = sjson.Set(out, "usage.input_tokens", inputTokens)
+
+		// Apply 1:2:25 cache token distribution
+		totalInputTokens := inputTokens + cachedTokens
+		distributed := internalusage.DistributeCacheTokens(totalInputTokens)
+
+		out, _ = sjson.Set(out, "usage.input_tokens", distributed.InputTokens)
 		out, _ = sjson.Set(out, "usage.output_tokens", outputTokens)
-		if cachedTokens > 0 {
-			out, _ = sjson.Set(out, "usage.cache_read_input_tokens", cachedTokens)
+		if distributed.CacheCreationInputTokens > 0 {
+			out, _ = sjson.Set(out, "usage.cache_creation_input_tokens", distributed.CacheCreationInputTokens)
+		}
+		if distributed.CacheReadInputTokens > 0 {
+			out, _ = sjson.Set(out, "usage.cache_read_input_tokens", distributed.CacheReadInputTokens)
 		}
 	}
 

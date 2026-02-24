@@ -232,6 +232,10 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		lastStatus = httpResp.StatusCode
 		lastBody = append([]byte(nil), data...)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		if geminiCLIIsAccountBanned(httpResp.StatusCode, data) {
+			log.Errorf("gemini cli executor: account banned for %s: %s", auth.ID, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+			return resp, newGeminiStatusErr(httpResp.StatusCode, data)
+		}
 		if httpResp.StatusCode == 429 {
 			if idx+1 < len(models) {
 				log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])
@@ -369,6 +373,10 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			lastStatus = httpResp.StatusCode
 			lastBody = append([]byte(nil), data...)
 			logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+			if geminiCLIIsAccountBanned(httpResp.StatusCode, data) {
+				log.Errorf("gemini cli executor: account banned for %s: %s", auth.ID, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+				return nil, newGeminiStatusErr(httpResp.StatusCode, data)
+			}
 			if httpResp.StatusCode == 429 {
 				if idx+1 < len(models) {
 					log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])
@@ -549,6 +557,10 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		}
 		lastStatus = resp.StatusCode
 		lastBody = append([]byte(nil), data...)
+		if geminiCLIIsAccountBanned(resp.StatusCode, data) {
+			log.Errorf("gemini cli executor: account banned for %s: %s", auth.ID, string(data))
+			return cliproxyexecutor.Response{}, newGeminiStatusErr(resp.StatusCode, data)
+		}
 		if resp.StatusCode == 429 {
 			log.Debugf("gemini cli executor: rate limited, retrying with next model")
 			continue
@@ -841,6 +853,21 @@ func fixGeminiCLIImageAspectRatio(modelName string, rawJSON []byte) []byte {
 		}
 	}
 	return rawJSON
+}
+
+// geminiCLIIsAccountBanned checks if a 403 response indicates an account ban.
+// Google returns 403 with "disabled" + "violation" for banned accounts.
+func geminiCLIIsAccountBanned(statusCode int, body []byte) bool {
+	if statusCode != http.StatusForbidden {
+		return false
+	}
+	if len(body) == 0 {
+		return false
+	}
+	msg := strings.ToLower(string(body))
+	return strings.Contains(msg, "disabled") || strings.Contains(msg, "violation") ||
+		strings.Contains(msg, "suspended") || strings.Contains(msg, "banned") ||
+		strings.Contains(msg, "terminated")
 }
 
 func newGeminiStatusErr(statusCode int, body []byte) statusErr {

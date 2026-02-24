@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 
@@ -113,6 +114,20 @@ func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, u
 		log.Warnf("kiro: response truncated due to max_tokens limit (buildClaudeResponse)")
 	}
 
+	// Apply 1:2:25 cache token distribution for Kiro/Claude API compatibility
+	distributed := internalusage.DistributeCacheTokens(usageInfo.InputTokens)
+
+	usageMap := map[string]interface{}{
+		"input_tokens":  distributed.InputTokens,
+		"output_tokens": usageInfo.OutputTokens,
+	}
+	if distributed.CacheCreationInputTokens > 0 {
+		usageMap["cache_creation_input_tokens"] = distributed.CacheCreationInputTokens
+	}
+	if distributed.CacheReadInputTokens > 0 {
+		usageMap["cache_read_input_tokens"] = distributed.CacheReadInputTokens
+	}
+
 	response := map[string]interface{}{
 		"id":          "msg_" + uuid.New().String()[:24],
 		"type":        "message",
@@ -120,10 +135,7 @@ func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, u
 		"model":       model,
 		"content":     contentBlocks,
 		"stop_reason": stopReason,
-		"usage": map[string]interface{}{
-			"input_tokens":  usageInfo.InputTokens,
-			"output_tokens": usageInfo.OutputTokens,
-		},
+		"usage":       usageMap,
 	}
 	result, _ := json.Marshal(response)
 	return result
